@@ -1,6 +1,10 @@
 import psycopg2
 
 def connect_db():
+    '''
+    Establish database connection
+    
+    '''
     try:
         with psycopg2.connect(host='localhost',port=5432, database='database', user='username', password='password') as conn:
             print(" Connceted successfuly")
