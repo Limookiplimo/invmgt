@@ -1,69 +1,100 @@
-import psycopg2
+from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common.typeinfo import Types
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.table import StreamTableEnvironment, DataTypes
-from pyflink.table.descriptors import Schema, Kafka, Json
-from dbconn import connect_db
+from pyflink.datastream.connectors.jdbc import JdbcConnectionOptions
+from pyflink.datastream.functions import KeyedProcessFunction
+from pyflink.datastream.state import ValueStateDescriptor
+from pyflink.table import StreamTableEnvironment, DataTypes, EnvironmentSettings
+from pyflink.table.window import Tumble
+import psycopg2
 
-# Flink parameters
-KAFKA_BOOTSTRAP_SERVER = 'localhost:9092'
-KAFKA_TOPIC = 'sales_topic'
+# Execution and Table environment
+env = StreamExecutionEnvironment.get_execution_environment()
+env.set_parallelism(1)
+settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
+t_env = StreamTableEnvironment.create(env, environment_settings=settings)
 
-def process_orders():
-    # Create a Flink execution environment and table environment
-    env = StreamExecutionEnvironment.get_execution_environment()
-    t_env = StreamTableEnvironment.create(env)
+# Create orders table
+t_env.execute_sql("""
+    CREATE TABLE orders (
+        ID INT,
+        CSMCODE STRING,
+        ORDDATE DATE,
+        ORDTIME TIMESTAMP(3),
+        PRDTID INT,
+        QUANTITY INT,
+        WEIGHT DOUBLE,
+        AMOUNT DOUBLE,
+        WATERMARK FOR ORDTIME AS ORDTIME - INTERVAL '5' SECOND
+    ) WITH (
+        'connector' = 'psycopg2',
+        'host' = 'localhost',
+        'port' = '5432',
+        'database' = 'database',
+        'table-name' = 'orders',
+        'username' = 'username',
+        'password' = 'password'
+    )
+""")
+# Aggregation statement
+aggregation_query = """
+    SELECT
+        TUMBLE_START(ORDTIME, INTERVAL '30' MINUTE) as window_start,
+        SUM(AMOUNT) as total_amount,
+        SUM(WEIGHT) as total_weight,
+        COUNT(*) as transaction_count
+    FROM orders
+    GROUP BY TUMBLE(ORDTIME, INTERVAL '30' MINUTE)
+"""
 
-    # Define the PostgreSQL query to stream sales data
-    query = "SELECT * FROM orders"
+# Register aggregation statement as view
+t_env.execute_sql("CREATE VIEW aggregation_view AS " + aggregation_query)
 
-    # Configure Flink to use Kafka as the data source
-    t_env \
-        .connect(  # Connect to the data source
-            Kafka()
-            .version("universal")
-            .topic(KAFKA_TOPIC)
-            .property("bootstrap.servers", KAFKA_BOOTSTRAP_SERVER)
-            .property("zookeeper.connect", "localhost:2181")
-        ) \
-        .with_format(  # Specify the format of the data
-            Json()
-            .json_schema(
-                "{"
-                "  'type': 'object',"
-                "  'properties': {"
-                "    'sale_id': {'type': 'integer'},"
-                "    'product': {'type': 'string'},"
-                "    'amount': {'type': 'double'},"
-                "    'timestamp': {'type': 'string', 'format': 'date-time'}"
-                "  }"
-                "}"
-            )
-            .fail_on_missing_field(True)
-        ) \
-        .with_schema(  # Specify the schema of the data
-            Schema()
-            .field("sale_id", DataTypes.INT())
-            .field("product", DataTypes.STRING())
-            .field("amount", DataTypes.DOUBLE())
-            .field("timestamp", DataTypes.TIMESTAMP())
-        ) \
-        .in_append_mode() \
-        .register_table_source("sales_source")
+# Stream processing
+class OrderProcessing(KeyedProcessFunction):
+    def open(self, runtime_context):
+        # State descriptors
+        total_amount_descriptor = ValueStateDescriptor("total_amount", Types.DOUBLE())
+        total_weight_descriptor = ValueStateDescriptor("total_weight", Types.DOUBLE())
+        transaction_count_descriptor = ValueStateDescriptor("transaction_count", Types.LONG())
 
-    # Define a table from the registered source
-    sales_table = t_env.from_path("sales_source")
+        # State handles
+        self.total_amount_state = runtime_context.get_state(total_amount_descriptor)
+        self.total_weight_state = runtime_context.get_state(total_weight_descriptor)
+        self.transaction_count_state = runtime_context.get_state(transaction_count_descriptor)
+    
+    def process_orders(self, value, ctx):
+        # Current state
+        current_total_amount = self.total_amount_state.value() or 0.0
+        current_total_weight = self.total_weight_state.value() or 0.0
+        current_transaction_count = self.transaction_count_state.value() or 0
 
-    # Perform computations on the sales table
-    result_table = sales_table.group_by("product") \
-        .select("product, amount.sum as total_amount")
+        # Add incoming values
+        current_total_amount += value["total_amount"]
+        current_total_weight += value["total_weight"]
+        current_transaction_count += value["transaction_count"]
 
-    # Define a sink to print the result to the console
-    result_table \
-        .to_retract_stream() \
-        .print()
+        # Update the state values
+        self.total_amount_state.update(current_total_amount)
+        self.total_weight_state.update(current_total_weight)
+        self.transaction_count_state.update(current_transaction_count)
 
-    # Execute the Flink job
-    env.execute("Sales Data Streaming")
+        # Emit updated values
+        ctx.output((value["window_start"], current_total_amount, current_total_weight, current_transaction_count))
 
-if __name__ == '__main__':
-    process_orders()
+# Datastream type information
+type_info = Types.ROW([Types.SQL_TIMESTAMP(), Types.DOUBLE(), Types.DOUBLE(), Types.LONG()])
+t_env.get_config().get_configuration().set_string("python.fn-execution.results-mode", "changelog")
+t_env.get_config().get_configuration().set_string("python.fn-execution.max-buffered-size", "1")
+
+# Aggregation view to Datastream
+data_stream = t_env.to_data_stream(t_env.sql_query("SELECT * FROM aggregation_view"), type_info)
+
+# Key the DataStream by the window start time
+data_stream = data_stream.key_by(lambda x: x[0])
+
+# Process the DataStream
+data_stream.process(OrderProcessing()).print()
+
+# Execute the Flink job
+env.execute()
