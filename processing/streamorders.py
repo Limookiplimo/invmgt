@@ -14,30 +14,9 @@ env.set_parallelism(1)
 settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
 t_env = StreamTableEnvironment.create(env, environment_settings=settings)
 
-# Create orders table
-t_env.execute_sql("""
-    CREATE TABLE orders (
-        ID INT,
-        CSMCODE STRING,
-        ORDDATE DATE,
-        ORDTIME TIMESTAMP(3),
-        PRDTID INT,
-        QUANTITY INT,
-        WEIGHT DOUBLE,
-        AMOUNT DOUBLE,
-        WATERMARK FOR ORDTIME AS ORDTIME - INTERVAL '5' SECOND
-    ) WITH (
-        'connector' = 'psycopg2',
-        'host' = 'localhost',
-        'port' = '5432',
-        'database' = 'database',
-        'table-name' = 'orders',
-        'username' = 'username',
-        'password' = 'password'
-    )
-""")
 # Aggregation statement
-aggregation_query = """
+# Register aggregation statement as view
+t_env.execute_sql("""
     SELECT
         TUMBLE_START(ORDTIME, INTERVAL '30' MINUTE) as window_start,
         SUM(AMOUNT) as total_amount,
@@ -45,10 +24,7 @@ aggregation_query = """
         COUNT(*) as transaction_count
     FROM orders
     GROUP BY TUMBLE(ORDTIME, INTERVAL '30' MINUTE)
-"""
-
-# Register aggregation statement as view
-t_env.execute_sql("CREATE VIEW aggregation_view AS " + aggregation_query)
+""")
 
 # Stream processing
 class OrderProcessing(KeyedProcessFunction):
