@@ -15,7 +15,6 @@ settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
 t_env = StreamTableEnvironment.create(env, environment_settings=settings)
 
 # Aggregation statement
-# Register aggregation statement as view
 t_env.execute_sql("""
     SELECT
         TUMBLE_START(ORDTIME, INTERVAL '30' MINUTE) as window_start,
@@ -58,19 +57,11 @@ class OrderProcessing(KeyedProcessFunction):
         # Emit updated values
         ctx.output((value["window_start"], current_total_amount, current_total_weight, current_transaction_count))
 
-# Datastream type information
+# Datastream
 type_info = Types.ROW([Types.SQL_TIMESTAMP(), Types.DOUBLE(), Types.DOUBLE(), Types.LONG()])
 t_env.get_config().get_configuration().set_string("python.fn-execution.results-mode", "changelog")
 t_env.get_config().get_configuration().set_string("python.fn-execution.max-buffered-size", "1")
-
-# Aggregation view to Datastream
 data_stream = t_env.to_data_stream(t_env.sql_query("SELECT * FROM aggregation_view"), type_info)
-
-# Key the DataStream by the window start time
 data_stream = data_stream.key_by(lambda x: x[0])
-
-# Process the DataStream
 data_stream.process(OrderProcessing()).print()
-
-# Execute the Flink job
 env.execute()
