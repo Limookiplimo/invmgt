@@ -1,67 +1,97 @@
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors.jdbc import JdbcConnectionOptions
-from pyflink.datastream.functions import KeyedProcessFunction
 from pyflink.datastream.state import ValueStateDescriptor
+from pyflink.datastream.connectors.kafka import FlinkKafkaProducer, FlinkKafkaConsumer
 from pyflink.table import StreamTableEnvironment, DataTypes, EnvironmentSettings
 from pyflink.table.window import Tumble
 import psycopg2
+from kafka import KafkaProducer, KafkaConsumer
 
-# Execution and Table environment
-env = StreamExecutionEnvironment.get_execution_environment()
-env.set_parallelism(1)
-settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
-t_env = StreamTableEnvironment.create(env, environment_settings=settings)
-
-# Aggregation statement
-t_env.execute_sql("""
-    SELECT
-        TUMBLE_START(ORDTIME, INTERVAL '30' MINUTE) as window_start,
-        SUM(AMOUNT) as total_amount,
-        SUM(WEIGHT) as total_weight,
-        COUNT(*) as transaction_count
-    FROM orders
-    GROUP BY TUMBLE(ORDTIME, INTERVAL '30' MINUTE)
-""")
 
 # Stream processing
-class OrderProcessing(KeyedProcessFunction):
-    def open(self, runtime_context):
-        # State descriptors
-        total_amount_descriptor = ValueStateDescriptor("total_amount", Types.DOUBLE())
-        total_weight_descriptor = ValueStateDescriptor("total_weight", Types.DOUBLE())
-        transaction_count_descriptor = ValueStateDescriptor("transaction_count", Types.LONG())
+def process_orders(value, ctx, runtime_context):
+    # State descriptors
+    total_amount_descriptor = ValueStateDescriptor("total_amount", DataTypes.FLOAT())
+    total_weight_descriptor = ValueStateDescriptor("total_weight", DataTypes.FLOAT())
+    transaction_count_descriptor = ValueStateDescriptor("transaction_count", DataTypes.BIGINT())
 
-        # State handles
-        self.total_amount_state = runtime_context.get_state(total_amount_descriptor)
-        self.total_weight_state = runtime_context.get_state(total_weight_descriptor)
-        self.transaction_count_state = runtime_context.get_state(transaction_count_descriptor)
-    
-    def process_orders(self, value, ctx):
-        # Current state
-        current_total_amount = self.total_amount_state.value() or 0.0
-        current_total_weight = self.total_weight_state.value() or 0.0
-        current_transaction_count = self.transaction_count_state.value() or 0
+    # State handles
+    total_amount_state = runtime_context.get_state(total_amount_descriptor)
+    total_weight_state = runtime_context.get_state(total_weight_descriptor)
+    transaction_count_state = runtime_context.get_state(transaction_count_descriptor)
 
-        # Add incoming values
-        current_total_amount += value["total_amount"]
-        current_total_weight += value["total_weight"]
-        current_transaction_count += value["transaction_count"]
+    # Current state
+    current_total_amount = total_amount_state.value() or 0.0
+    current_total_weight = total_weight_state.value() or 0.0
+    current_transaction_count = transaction_count_state.value() or 0
 
-        # Update the state values
-        self.total_amount_state.update(current_total_amount)
-        self.total_weight_state.update(current_total_weight)
-        self.transaction_count_state.update(current_transaction_count)
+    # Add incoming values
+    current_total_amount += float(value.split(',')[1])
+    current_total_weight += float(value.split(',')[2])
+    current_transaction_count += int(value.split(',')[3])
 
-        # Emit updated values
-        ctx.output((value["window_start"], current_total_amount, current_total_weight, current_transaction_count))
+    # Update the state values
+    total_amount_state.update(current_total_amount)
+    total_weight_state.update(current_total_weight)
+    transaction_count_state.update(current_transaction_count)
 
-# Datastream
-type_info = Types.ROW([Types.SQL_TIMESTAMP(), Types.DOUBLE(), Types.DOUBLE(), Types.LONG()])
-t_env.get_config().get_configuration().set_string("python.fn-execution.results-mode", "changelog")
-t_env.get_config().get_configuration().set_string("python.fn-execution.max-buffered-size", "1")
-data_stream = t_env.to_data_stream(t_env.sql_query("SELECT * FROM aggregation_view"), type_info)
-data_stream = data_stream.key_by(lambda x: x[0])
-data_stream.process(OrderProcessing()).print()
-env.execute()
+    # Emit updated values
+    return f"{value.split(',')[0]},{current_total_amount},{current_total_weight},{current_transaction_count}"
+
+  
+# PyFlink Job
+def publish_to_kafka():
+    # Flink kafka consumer
+    kafka_consumer = KafkaConsumer(
+            topics='processed_orders',
+            deserialization_schema=SimpleStringSchema(),
+            properties={'bootstrap_servers': 'localhost:9092', 'group.id':'sales-orders'}
+    )
+
+    # Flink kafka producer
+    kafka_producer = KafkaProducer(
+        topic='unprocessed_orders',
+        serialization_schema=SimpleStringSchema(),
+        properties={'bootstrap.servers': 'localhost:9092'}
+    )
+
+    # Path to the Flink Kafka connector JAR file
+    kafka_connector_jar = '/env/lib/python3.10/site-packages/pyflink/lib/flink-connector-files-1.17.1.jar'
+
+
+    # Execution environment
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(1)
+
+    # Database connection
+    try:
+        with psycopg2.connect(host='localhost', port=5432, database='database', user='username', password='password') as conn:
+            print("Successfully connected")
+            cursor = conn.cursor()
+
+            # Fetch data from the "orders" table
+            query = "SELECT * FROM orders;"
+            cursor.execute(query)
+            orders = cursor.fetchall()
+
+            # Send each order to the Kafka topic
+            for order in orders:
+                kafka_producer.send(value=','.join(str(item) for item in order))
+
+            # Flush and close the producer
+            kafka_producer.flush()
+            kafka_producer.close()
+
+    except psycopg2.Error as e:
+        print("Connection error:", e)
+
+    # Processing pipeline
+    env.add_source(kafka_consumer)\
+        .map(process_orders)\
+        .add_sink(kafka_producer)
+
+    # Execute job
+    env.execute("Stateful Sales Order Processing")
+
+publish_to_kafka()
