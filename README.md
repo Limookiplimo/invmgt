@@ -1,2 +1,2 @@
 # Invoice Management System
-As an invoice manage, I need a service that automates invoice processing(real time ), keeps track of process and serves a dashboard for analysis. This should serve routes alignment and logisticals needs for the company.
+As an invoice manager, I need a service that automates invoice processing(real time ), keeps track of the process and serves a dashboard for analysis. This should serve routes alignment and logisticals needs of the company.
