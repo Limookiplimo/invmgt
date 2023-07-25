@@ -1,4 +1,5 @@
-# Compose file to set up database, kafka and flink environments.
+# TODO
+# - adjust versions of apache flink job manager and task manager
 
 version: "3.9"
 
