@@ -1,97 +1,140 @@
-from pyflink.common.serialization import SimpleStringSchema
-from pyflink.common.typeinfo import Types
+"""
+- create database : DONE
+- load data to dabase: Done
+- extract data from database and publish to kafka topic
+- perform stateful processing with pyflink and write to these topics:
+        - invoices - [inv_id, csm_code, prd_id, amount]
+        - sales - [inv_count, amount]
+        - logistics - [total_weight, vehicles]
+- vizualize and monitor
+"""
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.state import ValueStateDescriptor
-from pyflink.datastream.connectors.kafka import FlinkKafkaProducer, FlinkKafkaConsumer
-from pyflink.table import StreamTableEnvironment, DataTypes, EnvironmentSettings
+from pyflink.table import StreamTableEnvironment, DataTypes
+from pyflink.table.udf import ScalarFunction
 from pyflink.table.window import Tumble
+from confluent_kafka import Producer
 import psycopg2
-from kafka import KafkaProducer, KafkaConsumer
+import json
+import datetime
 
 
-# Stream processing
-def process_orders(value, ctx, runtime_context):
-    # State descriptors
-    total_amount_descriptor = ValueStateDescriptor("total_amount", DataTypes.FLOAT())
-    total_weight_descriptor = ValueStateDescriptor("total_weight", DataTypes.FLOAT())
-    transaction_count_descriptor = ValueStateDescriptor("transaction_count", DataTypes.BIGINT())
+# Extract data
+def get_data():
+    try:
+        with psycopg2.connect(host='localhost', 
+                            port=5432, 
+                            database='database', 
+                            user='username', 
+                            password='password') as conn:
+            print("\n Successfully connected \n ")
+    except psycopg2.Error as e:
+        print(f"Connection error: ", e)
 
-    # State handles
-    total_amount_state = runtime_context.get_state(total_amount_descriptor)
-    total_weight_state = runtime_context.get_state(total_weight_descriptor)
-    transaction_count_state = runtime_context.get_state(transaction_count_descriptor)
+    cursor = conn.cursor()
+    cursor.execute("Select * from orders;")
+    orders = cursor.fetchall()
+    cursor.close()
+    conn.close()
 
-    # Current state
-    current_total_amount = total_amount_state.value() or 0.0
-    current_total_weight = total_weight_state.value() or 0.0
-    current_transaction_count = transaction_count_state.value() or 0
-
-    # Add incoming values
-    current_total_amount += float(value.split(',')[1])
-    current_total_weight += float(value.split(',')[2])
-    current_transaction_count += int(value.split(',')[3])
-
-    # Update the state values
-    total_amount_state.update(current_total_amount)
-    total_weight_state.update(current_total_weight)
-    transaction_count_state.update(current_transaction_count)
-
-    # Emit updated values
-    return f"{value.split(',')[0]},{current_total_amount},{current_total_weight},{current_transaction_count}"
-
-  
-# PyFlink Job
-def publish_to_kafka():
-    # Flink kafka consumer
-    kafka_consumer = KafkaConsumer(
-            topics='processed_orders',
-            deserialization_schema=SimpleStringSchema(),
-            properties={'bootstrap_servers': 'localhost:9092', 'group.id':'sales-orders'}
-    )
-
-    # Flink kafka producer
-    kafka_producer = KafkaProducer(
-        topic='unprocessed_orders',
-        serialization_schema=SimpleStringSchema(),
-        properties={'bootstrap.servers': 'localhost:9092'}
-    )
-
-    # Path to the Flink Kafka connector JAR file
-    kafka_connector_jar = '/env/lib/python3.10/site-packages/pyflink/lib/flink-connector-files-1.17.1.jar'
+    return orders
 
 
-    # Execution environment
+# Producer
+def order_producer(data):
+    bootstrap_servers = 'localhost:9092'
+    topic = 'orders'
+    producer_conf = {
+        'bootstrap.servers': bootstrap_servers,
+        'client.id': 'producer_flink'
+    }
+    kafka_producer = Producer(producer_conf)
+    for row in data:
+        message = {
+            'id': row[0],
+            'customer_code': row[1],
+            'orderdate': row[2].strftime('%Y-%m-%d'),
+            'ordertime': row[3].strftime('%H:%M:%S'),
+            'product_code': row[4],
+            'quantity': row[5],
+            'weight': row[6],
+            'amount': row[7]
+        }
+        serialize = json.dumps(message)
+        kafka_producer.produce(topic, value=serialize)
+
+    kafka_producer.flush()
+try:   
+    sales_data = get_data()
+    order_producer(sales_data)
+    print("Data published to Kafka successfully. \n")
+    
+except Exception as e:
+    print(f"Producer error: ", e)
+    
+
+def stream_sales():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
+    table_env = StreamTableEnvironment.create(env)
 
-    # Database connection
-    try:
-        with psycopg2.connect(host='localhost', port=5432, database='database', user='username', password='password') as conn:
-            print("Successfully connected")
-            cursor = conn.cursor()
+    # Kafka source table
+    table_env.execute_sql("""
+        CREATE TABLE orders_table (
+            id BIGINT,
+            customer_code STRING,
+            orderdate DATE,
+            ordertime TIME,
+            product_code STRING,
+            quantity INT,
+            weight FLOAT,
+            amount FLOAT
+        ) WITH (
+            'connector' = 'kafka',
+            'topic' = 'orders',
+            'properties.bootstrap.servers' = 'localhost:9092',
+            'properties.group.id' = 'flink_consumer_group',
+            'format' = 'json',
+            'json.fail-on-missing-field' = 'false'
+        )
+    """)
+  
+    # create and initiate loading of source Table
+    orders_tbl = table_env.from_path('orders_table')
 
-            # Fetch data from the "orders" table
-            query = "SELECT * FROM orders;"
-            cursor.execute(query)
-            orders = cursor.fetchall()
+    print('\n Source Schema')
+    orders_tbl.print_schema()
 
-            # Send each order to the Kafka topic
-            for order in orders:
-                kafka_producer.send(value=','.join(str(item) for item in order))
+# Register a table function to extract the timestamp from the 'orderdate' and 'ordertime' fields
+    class ExtractTimestamp(ScalarFunction):
+        def eval(self, orderdate, ordertime):
+            date_time_str = f"{orderdate} {ordertime}"
+            return datetime.datetime.strptime(date_time_str, '%Y-%m-%d %H:%M:%S')
+    table_env.create_temporary_system_function("ExtractTimestamp", ExtractTimestamp())
 
-            # Flush and close the producer
-            kafka_producer.flush()
-            kafka_producer.close()
+    # Use the registered function to extract the timestamp and assign it as the event time
+    orders_tbl = orders_tbl.select("id, customer_code, product_code, quantity, weight, amount, ExtractTimestamp(orderdate, ordertime) as event_time")
 
-    except psycopg2.Error as e:
-        print("Connection error:", e)
+    # Define a tumbling window with a size of 10 minutes and an offset of 0
+    tumbling_window = Tumble.over("10.minutes").on("event_time").alias("w")
 
-    # Processing pipeline
-    env.add_source(kafka_consumer)\
-        .map(process_orders)\
-        .add_sink(kafka_producer)
+    # Perform the aggregations over the tumbling window
+    agg_query = """
+        SELECT 
+            TUMBLE_START(event_time, INTERVAL '10' MINUTE) as window_start,
+            TUMBLE_END(event_time, INTERVAL '10' MINUTE) as window_end,
+            SUM(amount) as total_amount
+        FROM orders_table
+        GROUP BY TUMBLE(event_time, INTERVAL '10' MINUTE)
+"""
+    table_env.execute_sql(agg_query).print()
 
-    # Execute job
-    env.execute("Stateful Sales Order Processing")
+if __name__ == "__main__":
+    try:   
+        sales_data = get_data()
+        order_producer(sales_data)
+        print("Data published to Kafka successfully.\n")
+        print(sales_data)
+    except Exception as e:
+        print(f"Producer error: ", e)
 
-publish_to_kafka()
+    stream_sales()
