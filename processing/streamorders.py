@@ -1,8 +1,8 @@
 """
 - create database : DONE
-- load data to dabase: Done
-- extract data from database and publish to kafka topic
-- perform stateful processing with pyflink and write to these topics:
+- load data to dabase: DONE
+- extract data from database and publish to kafka topic: DONE
+- perform stateful processing with pyflink and write to these topics: ON PROGRESS
         - invoices - [inv_id, csm_code, prd_id, amount]
         - sales - [inv_count, amount]
         - logistics - [total_weight, vehicles]
