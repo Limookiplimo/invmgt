@@ -22,5 +22,6 @@ def stream_sales():
                 )
             """)
     
+    
 
     
