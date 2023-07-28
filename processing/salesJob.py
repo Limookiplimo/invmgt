@@ -1,40 +1,45 @@
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors import FlinkKafkaConsumer
+from pyflink.datastream.connectors import FlinkKafkaConsumer, FlinkKafkaProducer
 
 
 env = StreamExecutionEnvironment.get_execution_environment()
 env.set_parallelism(1)
 
-# Kafka consumer properties
-kafka_props = {
+# Kafka properties
+consumer_props = {
     "bootstrap.servers": "localhost:9092",
     "group.id": "flink_consumer_group",
     "auto.offset.reset": "latest" 
 }
-
-# Kafka topic and schema
-topic = "orders"
+producer_props = {
+    "bootstrap.servers": "localhost:9092"
+}
+input_topic = "orders"
+output_topic = "sales"
 schema = SimpleStringSchema()
 
-# FlinkKafkaConsumer to read from the Kafka topic
-kafka_consumer = FlinkKafkaConsumer(topic, schema, properties=kafka_props)
+kafka_producer = FlinkKafkaProducer(output_topic, schema, properties=producer_props)
+kafka_consumer = FlinkKafkaConsumer(input_topic, schema, properties=consumer_props)
 
-# Kafka consumer as the data source
+# Data source
 stream = env.add_source(kafka_consumer)
 
-# Parse the JSON messages and filter only the relevant fields (id and amount)
+# Relevant sales data
 parsed_stream = stream \
     .map(lambda msg: eval(msg)) \
-    .map(lambda msg: (msg["id"], msg["amount"]))
+    .map(lambda msg: (msg["id"], msg["amount"],msg["event_time"]))
 
-# Key-by operation to group by the 'id' field, and calculate the sum of the 'amount' field
-sum_amounts = parsed_stream \
+# Stateful processing
+sales = parsed_stream \
     .key_by(lambda x: x[0]) \
-    .reduce(lambda x, y: (x[0], x[1] + y[1]))
+    .reduce(lambda x, y: (x[0], x[1] + y[1], max(x[2], y[2])))
 
-# Print the result on the screen
-sum_amounts.print()
+# Print results
+sales.print()
 
-# Execute the Flink job
+# Data sink
+sales.add_sink(kafka_producer)
+
+# Execute the job
 env.execute("Kafka Order Processing")
