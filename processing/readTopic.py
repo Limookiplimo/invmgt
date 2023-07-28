@@ -1,36 +1,31 @@
 from confluent_kafka import Consumer, KafkaError
+from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
+from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common import WatermarkStrategy
+import time
 
-def consume_topic(topic):
+def consume_topic():
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(1)
     bootstrap_servers = 'localhost:9092'
+    input_topic = 'orders'
     group_id = 'flink_consumer_group'
-    consumer_conf = {
-        'bootstrap.servers': bootstrap_servers,
-        'group.id': group_id,
-        'auto.offset.reset': 'earliest'
-    }
 
-    consumer = Consumer(consumer_conf)
-    consumer.subscribe([topic])
+    kafka_source = KafkaSource\
+            .builder()\
+            .set_bootstrap_servers(bootstrap_servers)\
+            .set_topics(input_topic)\
+            .set_group_id(group_id)\
+            .set_starting_offsets(KafkaOffsetsInitializer.earliest())\
+            .set_value_only_deserializer(SimpleStringSchema())\
+            .build()
+    
+    msg = env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), input_topic)
 
-    try:
-        while True:
-            msg = consumer.poll(1.0)
-
-            if msg is None:
-                continue
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    print(f"Reached end of partition: {msg.partition()}")
-                else:
-                    print(f"Error while consuming: {msg.error()}")
-            else:
-                print(f"Received message: {msg.value().decode('utf-8')}")
-
-    except KeyboardInterrupt:
-        print("Interrupted, closing consumer...")
-    finally:
-        consumer.close()
+    msg.print()
+    time.sleep(1)
+    env.execute("Read Kafka Topic")
 
 if __name__ == '__main__':
-    topic_name = 'orders'
-    consume_topic(topic_name)
+    consume_topic()
