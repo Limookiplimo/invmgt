@@ -1,6 +1,7 @@
 from confluent_kafka import Producer
 import psycopg2
 import json
+import time
 
 
 # Extract data
@@ -45,10 +46,13 @@ def order_producer(data):
         }
         serialize = json.dumps(message)
         kafka_producer.produce(topic, value=serialize)
+        print(serialize)
+        time.sleep(1)
 
     kafka_producer.flush()
+    
 
-try:   
+try:
     sales_data = get_data()
     order_producer(sales_data)
     print("Data published to Kafka successfully. \n")
