@@ -1,6 +1,3 @@
-# TODO
-# - adjust versions of apache flink job manager and task manager
-
 version: "3.9"
 
 services:
