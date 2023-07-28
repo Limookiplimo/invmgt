@@ -1,36 +1,44 @@
 from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common import WatermarkStrategy
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors import FlinkKafkaConsumer, FlinkKafkaProducer
+from pyflink.datastream.connectors.kafka import KafkaSource, KafkaSink, KafkaRecordSerializationSchema, DeliveryGuarantee
 
 
 env = StreamExecutionEnvironment.get_execution_environment()
 env.set_parallelism(1)
 
-# Kafka properties
-consumer_props = {
-    "bootstrap.servers": "localhost:9092",
-    "group.id": "flink_consumer_group",
-    "auto.offset.reset": "latest" 
-}
-producer_props = {
-    "bootstrap.servers": "localhost:9092"
-}
+# Kafka Properties
 input_topic = "orders"
 output_topic = "sales"
 schema = SimpleStringSchema()
 
-kafka_producer = FlinkKafkaProducer(output_topic, schema, properties=producer_props)
-kafka_consumer = FlinkKafkaConsumer(input_topic, schema, properties=consumer_props)
+kafka_source = KafkaSource \
+        .builder() \
+        .set_bootstrap_servers("localhost:9092") \
+        .set_group_id("flink_consumer_group") \
+        .set_topics(input_topic) \
+        .set_value_only_deserializer(schema) \
+        .build()
+
+kafka_sink = KafkaSink\
+        .builder()\
+        .set_bootstrap_servers("localhost:9092") \
+        .set_record_serializer(
+            KafkaRecordSerializationSchema.builder()
+            .set_topic(output_topic)
+            .set_value_serialization_schema(schema)
+            .build()) \
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE) \
+        .build()
 
 # Data source
-stream = env.add_source(kafka_consumer)
+stream = env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), input_topic)
 
-# Relevant sales data
+# Data processing
 parsed_stream = stream \
     .map(lambda msg: eval(msg)) \
     .map(lambda msg: (msg["id"], msg["amount"],msg["event_time"]))
 
-# Stateful processing
 sales = parsed_stream \
     .key_by(lambda x: x[0]) \
     .reduce(lambda x, y: (x[0], x[1] + y[1], max(x[2], y[2])))
@@ -39,7 +47,7 @@ sales = parsed_stream \
 sales.print()
 
 # Data sink
-sales.add_sink(kafka_producer)
+sales.add_sink(kafka_sink)
 
 # Execute the job
 env.execute("Kafka Order Processing")
