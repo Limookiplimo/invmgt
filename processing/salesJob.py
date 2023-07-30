@@ -2,6 +2,15 @@ from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common import WatermarkStrategy
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import KafkaSource, KafkaSink, KafkaRecordSerializationSchema, DeliveryGuarantee
+import json
+
+def parse_json(msg):
+    try:
+        data = json.loads(msg)
+        return data["id"], data["amount"], data["event_time"]
+    except json.JSONDecodeError as e:
+        print(f" Json decode error: ", e)
+        return None
 
 def process_orders():
     env = StreamExecutionEnvironment.get_execution_environment()
@@ -20,34 +29,31 @@ def process_orders():
             .set_value_only_deserializer(schema) \
             .build()
 
-    kafka_sink = KafkaSink\
-            .builder()\
-            .set_bootstrap_servers("localhost:9092") \
-            .set_record_serializer(
-                KafkaRecordSerializationSchema.builder()
-                .set_topic(output_topic)
-                .set_value_serialization_schema(schema)
-                .build()) \
-            .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE) \
-            .build()
-
     # Data source
     stream = env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), input_topic)
 
     # Data processing
-    parsed_stream = stream \
-        .map(lambda msg: eval(msg)) \
-        .map(lambda msg: (msg["id"], msg["amount"], msg["event_time"]))
+    parsed_stream = stream.map(parse_json).filter(lambda x: x is not None)
 
     sales = parsed_stream \
         .key_by(lambda x: x[0]) \
         .reduce(lambda x, y: (x[0], x[1] + y[1], max(x[2], y[2])))
 
-    # Sink topic
-    sales.sink_to(kafka_sink)
+    # Convert to JSON
+    sales_json = sales.map(lambda x: json.dumps({"id":x[0],"total_amount":x[1],"max_event_time":x[2]}))
 
-    # Print results
-    sales.print()
+    record_serializer = KafkaRecordSerializationSchema.builder() \
+            .set_topic(output_topic) \
+            .set_value_serialization_schema(SimpleStringSchema()) \
+            .set_key_serialization_schema(SimpleStringSchema()) \
+            .build()
+    
+    kafka_sink = KafkaSink.builder() \
+            .set_bootstrap_servers("localhost:9092") \
+            .set_record_serializer(record_serializer) \
+            .build()
+    
+    sales_json.add_sink(kafka_sink)
 
     # Execute the job
     env.execute("Kafka Order Processing")
