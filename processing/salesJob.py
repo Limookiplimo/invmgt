@@ -1,59 +1,50 @@
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common import WatermarkStrategy
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors.kafka import KafkaSource, KafkaSink, KafkaRecordSerializationSchema, DeliveryGuarantee
+from pyflink.datastream.connectors.kafka import KafkaSource, FlinkKafkaProducer
+from pyflink.common.typeinfo import Types
+from pyflink.datastream.formats.json import JsonRowSerializationSchema
 import json
 
-def parse_json(msg):
-    try:
-        data = json.loads(msg)
-        return data["id"], data["amount"], data["event_time"]
-    except json.JSONDecodeError as e:
-        print(f" Json decode error: ", e)
-        return None
 
 def process_orders():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
 
     # Kafka Properties
+    bootstrap_servers = 'localhost:9092'
+    flink_group = "flink_consumer_group"
     input_topic = "orders"
     output_topic = "sales"
-    schema = SimpleStringSchema()
 
+    schema = SimpleStringSchema()
     kafka_source = KafkaSource \
             .builder() \
-            .set_bootstrap_servers("localhost:9092") \
-            .set_group_id("flink_consumer_group") \
+            .set_bootstrap_servers(bootstrap_servers) \
+            .set_group_id(flink_group) \
             .set_topics(input_topic) \
             .set_value_only_deserializer(schema) \
             .build()
 
     # Data source
-    stream = env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), input_topic)
+    stream = env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), source_name=input_topic)
 
-    # Data processing
-    parsed_stream = stream.map(parse_json).filter(lambda x: x is not None)
+    sales_json = stream \
+            .map(lambda msg: json.loads(msg)) \
+            .key_by(lambda x: x["id"]) \
+            .reduce(lambda x, y: {"id": x["id"], "amount": x["amount"] + y["amount"], "event_time": max(x["event_time"], y["event_time"])})
 
-    sales = parsed_stream \
-        .key_by(lambda x: x[0]) \
-        .reduce(lambda x, y: (x[0], x[1] + y[1], max(x[2], y[2])))
+    # The new row type for the JSON serialization schema based on the reduced result.
+    serialization_schema = JsonRowSerializationSchema.builder().with_type_info(
+        type_info=Types.ROW([Types.INT(), Types.INT(), Types.STRING()])).build()
 
-    # Convert to JSON
-    sales_json = sales.map(lambda x: json.dumps({"id":x[0],"total_amount":x[1],"max_event_time":x[2]}))
+    # Sink to Kafka
+    kafka_producer = FlinkKafkaProducer(
+        topic=output_topic,
+        serialization_schema=SimpleStringSchema(),
+        producer_config={"bootstrap.servers": "localhost:9092", "group.id": "flink_kafka_producer"})
 
-    record_serializer = KafkaRecordSerializationSchema.builder() \
-            .set_topic(output_topic) \
-            .set_value_serialization_schema(SimpleStringSchema()) \
-            .set_key_serialization_schema(SimpleStringSchema()) \
-            .build()
-    
-    kafka_sink = KafkaSink.builder() \
-            .set_bootstrap_servers("localhost:9092") \
-            .set_record_serializer(record_serializer) \
-            .build()
-    
-    sales_json.add_sink(kafka_sink)
+    sales_json.add_sink(kafka_producer)
 
     # Execute the job
     env.execute("Kafka Order Processing")
