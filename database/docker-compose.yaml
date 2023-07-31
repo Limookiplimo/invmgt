@@ -29,25 +29,23 @@ services:
       - ALLOW_PLAINTEXT_LISTENER=yes
     depends_on:
       - zookeeper
-    
-  flink-jobmanager:
-    image: apache/flink:1.17.0
-    container_name: flink-jobmanager
+
+  jobmanager:
+    image: flink:1.17.0
+    container_name: jobmanager
     expose:
-      - "8081"
+      - "6123" # Web UI
     ports:
-      - "8081:8081"
+      - "8081:8081" # Web UI
     command: jobmanager
 
-  flink-taskmanager:
-    image: apache/flink:1.17.0
-    container_name: flink-taskmanager
+  taskmanager:
+    image: flink:1.17.0
+    container_name: taskmanager
     depends_on:
-      - flink-jobmanager
+      - jobmanager
     expose:
-      - "6123"
-      - "6124"
+      - "6121" # TaskManager
+      - "6122" # TaskManager Data
     command: taskmanager
-    environment:
-      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
 
