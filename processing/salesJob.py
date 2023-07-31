@@ -9,7 +9,6 @@ import json
 
 def process_orders():
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(1)
 
     # Kafka Properties
     bootstrap_servers = 'localhost:9092'
@@ -34,14 +33,14 @@ def process_orders():
             .key_by(lambda x: x["id"]) \
             .reduce(lambda x, y: {"id": x["id"], "amount": x["amount"] + y["amount"], "event_time": max(x["event_time"], y["event_time"])})
 
-    # The new row type for the JSON serialization schema based on the reduced result.
+    # JSON serialization schema
     serialization_schema = JsonRowSerializationSchema.builder().with_type_info(
         type_info=Types.ROW([Types.INT(), Types.INT(), Types.STRING()])).build()
 
     # Sink to Kafka
     kafka_producer = FlinkKafkaProducer(
         topic=output_topic,
-        serialization_schema=SimpleStringSchema(),
+        serialization_schema=serialization_schema,
         producer_config={"bootstrap.servers": "localhost:9092", "group.id": "flink_kafka_producer"})
 
     sales_json.add_sink(kafka_producer)
