@@ -31,21 +31,24 @@ services:
       - zookeeper
 
   jobmanager:
-    image: flink:1.17.0
-    container_name: jobmanager
-    expose:
-      - "6123" # Web UI
+    image: flink:latest
     ports:
-      - "8081:8081" # Web UI
+      - "8081:8081"
     command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager        
 
   taskmanager:
-    image: flink:1.17.0
-    container_name: taskmanager
+    image: flink:latest
     depends_on:
       - jobmanager
-    expose:
-      - "6121" # TaskManager
-      - "6122" # TaskManager Data
     command: taskmanager
+    scale: 1
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2   
 
