@@ -10,7 +10,7 @@ def consume_topic():
         env = StreamExecutionEnvironment.get_execution_environment()
         env.set_parallelism(1)
         bootstrap_servers = 'localhost:9092'
-        input_topic = 'orders'
+        input_topic = 'sales'
         group_id = 'flink_consumer_group'
 
         kafka_source = KafkaSource\
